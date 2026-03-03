@@ -17,7 +17,7 @@ from typing import Annotated, Optional, TypedDict, Literal
 import yfinance as yf
 import pandas as pd
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -93,6 +93,45 @@ def cache_set(key: str, value: str, ex: int = 60) -> None:
     except Exception:
         pass
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WEBSOCKET CONNECTION MANAGER
+# ─────────────────────────────────────────────────────────────────────────────
+class PriceStreamManager:
+    """Manage WebSocket connections for live price updates."""
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}  # {symbol: [ws, ...]}
+
+    async def connect(self, symbol: str, websocket: WebSocket):
+        await websocket.accept()
+        if symbol not in self.active_connections:
+            self.active_connections[symbol] = []
+        self.active_connections[symbol].append(websocket)
+        logger.info(f"[WS] {symbol} connected, total: {len(self.active_connections[symbol])}")
+
+    async def disconnect(self, symbol: str, websocket: WebSocket):
+        if symbol in self.active_connections:
+            self.active_connections[symbol].remove(websocket)
+            if not self.active_connections[symbol]:
+                del self.active_connections[symbol]
+        logger.info(f"[WS] {symbol} disconnected")
+
+    async def broadcast(self, symbol: str, message: dict):
+        """Send update to all clients listening to this symbol."""
+        if symbol not in self.active_connections:
+            return
+        disconnected = []
+        for ws in self.active_connections[symbol]:
+            try:
+                await ws.send_json(message)
+            except Exception as e:
+                logger.debug(f"[WS] send error for {symbol}: {e}")
+                disconnected.append(ws)
+        # cleanup dead connections
+        for ws in disconnected:
+            await self.disconnect(symbol, ws)
+
+manager = PriceStreamManager()
 logger = logging.getLogger(__name__)
 
 
@@ -525,6 +564,34 @@ class QuickRequest(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WEBSOCKET ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws/prices/{symbol}")
+async def websocket_price_stream(websocket: WebSocket, symbol: str):
+    """
+    WebSocket endpoint for live price updates.
+    Example: ws://localhost:8000/ws/prices/AAPL
+    
+    Sends JSON updates like:
+    {"symbol": "AAPL", "price": 150.25, "change_pct": 1.5, "timestamp": "2026-03-03T10:30:00"}
+    """
+    symbol = symbol.upper()
+    await manager.connect(symbol, websocket)
+    try:
+        # Keep connection alive; client receives price broadcasts
+        while True:
+            # This just waits for messages from client (e.g., heartbeat ping)
+            # In production, you might handle client commands here.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await manager.disconnect(symbol, websocket)
+    except Exception as e:
+        logger.error(f"[WS] {symbol} error: {e}")
+        await manager.disconnect(symbol, websocket)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PUBLIC ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -602,14 +669,27 @@ async def quick_analyze(
 ):
     """
     One-click stock/crypto analysis — requires authentication.
-    Rate limited to 60/min per user.
+    Rate limited to 60/min per user. Broadcasts price update to WebSocket.
     """
+    symbol = req.symbol.upper()
     if req.asset_type == "crypto":
-        data = json.loads(get_crypto_data.invoke({"coin_id": req.symbol}))
+        data = json.loads(get_crypto_data.invoke({"coin_id": symbol}))
     else:
-        data = json.loads(get_stock_data.invoke({"symbol": req.symbol}))
-    prediction = json.loads(predict_asset.invoke({"symbol": req.symbol, "asset_type": req.asset_type}))
-    return {"asset_data": data, "prediction": prediction, "data_type": req.asset_type}
+        data = json.loads(get_stock_data.invoke({"symbol": symbol}))
+    prediction = json.loads(predict_asset.invoke({"symbol": symbol, "asset_type": req.asset_type}))
+    output = {"asset_data": data, "prediction": prediction, "data_type": req.asset_type}
+
+    # Broadcast price to WebSocket listeners
+    if "error" not in data:
+        broadcast_msg = {
+            "symbol": symbol,
+            "price": data.get("current_price"),
+            "change_pct": data.get("change_24h") if req.asset_type == "crypto" else data.get("change_1d_pct"),
+            "timestamp": datetime.now().isoformat(),
+        }
+        await manager.broadcast(symbol, broadcast_msg)
+
+    return output
 
 
 if __name__ == "__main__":

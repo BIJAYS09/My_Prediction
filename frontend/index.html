@@ -1097,6 +1097,56 @@ const TokenStore = (() => {
     }, ACCESS_TTL_MS);
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // WEBSOCKET PRICE STREAM MANAGER
+  // ─────────────────────────────────────────────────────────────────────────
+  const priceStreams = new Map();  // { symbol: { ws: WebSocket, listeners: Set } }
+
+  function connectPriceStream(symbol) {
+    symbol = symbol.toUpperCase();
+    if (priceStreams.has(symbol)) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${protocol}://${window.location.host}/ws/prices/${symbol}`);
+    
+    ws.onmessage = (event) => {
+      const update = JSON.parse(event.data);
+      const listeners = priceStreams.get(symbol)?.listeners;
+      if (listeners) {
+        listeners.forEach(cb => cb(update));
+      }
+    };
+
+    ws.onerror = () => {
+      console.warn(`[WS] ${symbol} connection error`);
+      priceStreams.delete(symbol);
+    };
+
+    ws.onclose = () => {
+      console.log(`[WS] ${symbol} closed`);
+      priceStreams.delete(symbol);
+    };
+
+    priceStreams.set(symbol, { ws, listeners: new Set() });
+  }
+
+  function onPriceUpdate(symbol, callback) {
+    symbol = symbol.toUpperCase();
+    if (!priceStreams.has(symbol)) {
+      connectPriceStream(symbol);
+    }
+    priceStreams.get(symbol).listeners.add(callback);
+  }
+
+  function disconnectPriceStream(symbol) {
+    symbol = symbol.toUpperCase();
+    const stream = priceStreams.get(symbol);
+    if (stream) {
+      stream.ws.close();
+      priceStreams.delete(symbol);
+    }
+  }
+
   async function silentRefresh() {
     if (!_refreshToken) return;
     try {
@@ -1468,6 +1518,18 @@ function renderAsset(data, type) {
     return;
   }
 
+  // Subscribe to live price updates for this symbol
+  const symbol = asset.symbol.toUpperCase();
+  onPriceUpdate(symbol, (update) => {
+    const priceEl = document.getElementById('assetPrice');
+    const changeEl = document.getElementById('assetChange');
+    if (priceEl && changeEl) {
+      priceEl.textContent = `$${update.price?.toFixed(2) || asset.current_price?.toFixed(2)}`;
+      const changePct = update.change_pct ?? (type === 'crypto' ? asset.change_24h : asset.change_1d_pct);
+      changeEl.textContent = `${changePct >= 0 ? '+' : ''}${changePct?.toFixed(2)}%`;
+      changeEl.className = changePct >= 0 ? 'price-change up' : 'price-change down';
+    }
+  });
   const price = asset.current_price;
   const change1d = type === 'stock' ? asset.change_1d_pct : asset.change_24h;
   const change7d = type === 'stock' ? asset.change_1w_pct : asset.change_7d;
