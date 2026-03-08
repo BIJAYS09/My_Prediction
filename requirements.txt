@@ -15,7 +15,7 @@ ta
 slowapi
 bcrypt
 python-jose[cryptography]
-aiosqlite
+asyncpg
 pydantic[email]
 redis
 textblob

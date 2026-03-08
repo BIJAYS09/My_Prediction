@@ -8,6 +8,7 @@ from textblob import TextBlob
 from langchain_core.tools import tool
 
 from cache import cache_get, cache_set
+from core.database import save_prediction, get_predictions, get_accuracy_stats
 from core.config import settings
 import logging
 
@@ -178,7 +179,7 @@ def get_market_overview() -> str:
 
 
 @tool
-def predict_asset(symbol: str, asset_type: str = "stock") -> str:
+async def predict_asset(symbol: str, asset_type: str = "stock") -> str:
     """Generate a technical analysis prediction for a stock or crypto.
     Args:
         symbol: Ticker or coin name (e.g., AAPL or bitcoin)
@@ -234,7 +235,7 @@ def predict_asset(symbol: str, asset_type: str = "stock") -> str:
         elif score <= -1: pred, conf, chg = "SELL", min(75, 50+abs(score)*5), -(2.0+abs(score)*1.0)
         else: pred, conf, chg = "HOLD", 50, 0.0
 
-        return json.dumps({
+        data = {
             "symbol": symbol.upper(), "current_price": round(float(current), 4),
             "prediction": pred, "confidence": conf, "score": score,
             "target_price": round(float(current*(1+chg/100)), 2),
@@ -245,7 +246,22 @@ def predict_asset(symbol: str, asset_type: str = "stock") -> str:
                 "sma20": round(float(sma20),4), "sma50": round(float(sma50),4),
                 "bb_upper": round(bb_upper,4), "bb_lower": round(bb_lower,4),
             }
-        })
+        }
+
+        # Save prediction to database
+        try:
+            await save_prediction(
+                symbol=symbol,
+                asset_type=asset_type,
+                predicted_price=data["target_price"],
+                target_price=data["target_price"],
+                confidence=data["confidence"],
+                timeframe=data["timeframe"],
+            )
+        except Exception as e:
+            logger.warning(f"[Tool:predict_asset] Failed to save prediction: {e}")
+
+        return json.dumps(data)
     except Exception as e:
         logger.error(f"[Tool:predict_asset] {e}")
         return json.dumps({"error": str(e)})
@@ -323,4 +339,49 @@ def get_news_sentiment(symbol: str, limit: int = 10) -> str:
         return json.dumps({"error": str(e)})
 
 
-tools_list = [get_stock_data, get_crypto_data, get_market_overview, predict_asset, get_news_sentiment]
+@tool
+async def get_prediction_history(symbol: str = None, asset_type: str = None, limit: int = 20) -> str:
+    """Get prediction history for accuracy analysis.
+    Args:
+        symbol: Optional stock ticker or crypto name to filter by
+        asset_type: Optional 'stock' or 'crypto' to filter by
+        limit: Maximum number of predictions to return (default 20)
+    """
+    try:
+        predictions = await get_predictions(symbol, asset_type, limit)
+        return json.dumps({
+            "predictions": predictions,
+            "count": len(predictions)
+        })
+    except Exception as e:
+        logger.error(f"[Tool:get_prediction_history] {e}")
+        return json.dumps({"error": str(e)})
+
+
+@tool
+async def get_accuracy_stats(symbol: str = None, asset_type: str = None) -> str:
+    """Get accuracy statistics for past predictions.
+    Args:
+        symbol: Optional stock ticker or crypto name to filter by
+        asset_type: Optional 'stock' or 'crypto' to filter by
+    """
+    try:
+        stats = await get_accuracy_stats(symbol, asset_type)
+        if not stats:
+            return json.dumps({"message": "No completed predictions found for accuracy analysis"})
+
+        return json.dumps({
+            "total_predictions": stats.get("total_predictions", 0),
+            "average_accuracy_pct": round(stats.get("avg_accuracy", 0), 2),
+            "best_accuracy_pct": round(stats.get("min_accuracy", 0), 2),
+            "worst_accuracy_pct": round(stats.get("max_accuracy", 0), 2),
+            "excellent_predictions": stats.get("excellent_count", 0),  # <=5% error
+            "good_predictions": stats.get("good_count", 0),          # 5-10% error
+            "poor_predictions": stats.get("poor_count", 0),          # >10% error
+        })
+    except Exception as e:
+        logger.error(f"[Tool:get_accuracy_stats] {e}")
+        return json.dumps({"error": str(e)})
+
+
+tools_list = [get_stock_data, get_crypto_data, get_market_overview, predict_asset, get_news_sentiment, get_prediction_history, get_accuracy_stats]

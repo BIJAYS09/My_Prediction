@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
         raise SystemExit(1)
 
     # 2. Init database
-    await init_db(settings.db_path)
+    await init_db(settings.database_url)
 
     # 3. Build agent singleton
     try:
