@@ -5,14 +5,22 @@ A real-time market intelligence app powered by **LangGraph**, **LangChain**, **F
 ## Architecture
 
 ```
-stock-predictor/
-├── backend/
-│   ├── main.py              # FastAPI + LangGraph agent
-│   ├── requirements.txt     # Python dependencies
-│   └── .env.example         # Environment variables template
-└── frontend/
-    └── index.html           # Single-file UI (no build required)
+quantai/
+├── main.py                 # FastAPI + LangGraph agent
+├── tools.py                # All @tool logic (data fetch, prediction, sentiment, history)
+├── cache.py                # Redis helpers (optional caching)
+├── websocket.py            # PriceStreamManager
+├── schemas.py              # Request/response models
+├── core/                   # auth, config, database, rate-limiting
+├── routers/                # auth endpoints
+├── frontend/               # static UI (index.html)
+├── Dockerfile              # container build instructions
+├── requirements.txt
+└── .github/                # CI/CD workflows
 ```
+
+The backend uses **PostgreSQL + asyncpg** (config via `DATABASE_URL`); predictions are stored and accuracy is tracked.
+
 
 ## Features
 
@@ -59,6 +67,34 @@ Just open `frontend/index.html` in your browser — no build step!
 cd frontend && python -m http.server 3000
 ```
 Then visit: `http://localhost:3000`
+
+### 3. Docker (optional)
+
+A `Dockerfile` lets you containerize the app for consistent deployment:
+
+```bash
+# build locally
+docker build -t quantai:latest .
+
+# run with environment variables
+docker run -e OPENAI_API_KEY=sk-... -e DATABASE_URL=postgresql://user:pass@host/db \
+    -p 8000:8000 quantai:latest
+```
+
+The image is multi-stage, keeping the runtime slim.
+
+
+## Continuous Integration / Deployment
+
+GitHub Actions pipeline at `.github/workflows/ci.yml` automatically:
+
+1. installs dependencies
+2. lints/compiles all Python files
+3. builds the Docker image
+4. tags & pushes to GitHub Container Registry (`ghcr.io/${{ github.repository }}/quantai:latest`)
+
+You can extend the workflow to run unit tests or deploy the image to a cloud provider.
+
 
 ## Usage
 
